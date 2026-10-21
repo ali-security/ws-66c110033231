@@ -65,11 +65,15 @@ describe('WebSocketServer', () => {
         });
       });
 
-      it('accepts the `maxPayload` option', (done) => {
+      it('accepts the receiver limit options', (done) => {
+        const maxBufferedChunks = 1024;
+        const maxFragments = 512;
         const maxPayload = 20480;
         const wss = new WebSocket.Server(
           {
             perMessageDeflate: true,
+            maxBufferedChunks,
+            maxFragments,
             maxPayload,
             port: 0
           },
@@ -81,12 +85,54 @@ describe('WebSocketServer', () => {
         );
 
         wss.on('connection', (ws) => {
+          assert.strictEqual(
+            ws._receiver._maxBufferedChunks,
+            maxBufferedChunks
+          );
+          assert.strictEqual(ws._receiver._maxFragments, maxFragments);
           assert.strictEqual(ws._receiver._maxPayload, maxPayload);
           assert.strictEqual(
             ws._receiver._extensions['permessage-deflate']._maxPayload,
             maxPayload
           );
           wss.close(done);
+        });
+      });
+
+      it('limits the number of message fragments by default', (done) => {
+        const wss = new WebSocket.Server({ port: 0 }, () => {
+          const ws = new WebSocket(`ws://localhost:${wss.address().port}`);
+
+          ws.on('close', (code) => {
+            assert.strictEqual(code, 1008);
+            wss.close(done);
+          });
+        });
+
+        wss.on('connection', (ws) => {
+          assert.strictEqual(ws._receiver._maxBufferedChunks, 256 * 1024);
+          assert.strictEqual(ws._receiver._maxFragments, 16 * 1024);
+
+          //
+          // A non-final 1-byte binary fragment followed by enough 1-byte
+          // continuation fragments to exceed the default limit.
+          //
+          const fragment = Buffer.from([
+            0x00, 0x81, 0x00, 0x00, 0x00, 0x00, 0x62
+          ]);
+          const list = [
+            Buffer.from([0x02, 0x81, 0x00, 0x00, 0x00, 0x00, 0x61])
+          ];
+
+          for (let i = 0; i < 16 * 1024; i++) list.push(fragment);
+
+          ws.on('error', (err) => {
+            assert.ok(err instanceof RangeError);
+            assert.strictEqual(err.code, 'WS_ERR_TOO_MANY_BUFFERED_PARTS');
+            assert.strictEqual(err.message, 'Too many message fragments');
+          });
+
+          ws._socket.push(Buffer.concat(list));
         });
       });
 
